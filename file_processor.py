@@ -21,7 +21,7 @@ class FileProcessor:
             self.log_callback(f"Error reading input file: {e}")
             return None
 
-        if not content.strip(): # Handles completely empty or whitespace-only file
+        if not content.strip():
             self.log_callback("Input file is empty or contains only whitespace. No chapters to split.")
             return None
 
@@ -35,7 +35,7 @@ class FileProcessor:
             if not split_value:
                 self.log_callback("Error: Split regex cannot be empty for 'regex' mode.")
                 return None
-            base_delimiter_pattern_for_regex = split_value # User provides valid regex
+            base_delimiter_pattern_for_regex = split_value
         else:
             self.log_callback("Error: Invalid split mode.")
             return None
@@ -49,26 +49,22 @@ class FileProcessor:
             return None
 
         processed_chapters = []
-        current_chapter_id_offset = 0
+        # Initialize the two counters
+        filename_id_counter = start_number
+        default_naming_sequence_counter = start_number
 
+        # --- Structural Validations ---
         if not raw_parts[0].strip() and len(raw_parts) > 1:
             self.log_callback("Error: File structure invalid. Content cannot start with a delimiter.")
             return None
 
         if len(raw_parts) == 1:
-            # This means no delimiter was found. If content was just "text", it's an error
-            # because the structure TEXT DELIM ... FINAL_DELIM is expected.
-            # If raw_parts[0] is non-empty, it means it's "text" without any delimiter.
             if raw_parts[0].strip():
                 self.log_callback("Error: File structure invalid. No delimiters found, or file does not end with a delimiter as required.")
                 return None
             else:
-                # If raw_parts[0] is empty/whitespace and len is 1, it means the original content was empty/whitespace.
-                # This should have been caught by the `if not content.strip():` check at the beginning.
-                # This path should ideally not be reached if the initial check is effective.
                 self.log_callback("Input file is effectively empty after attempting to split. No chapters.")
                 return None
-
 
         if (len(raw_parts) - 1) % 3 != 0:
             self.log_callback(f"Error: Invalid file structure. Segment count ({len(raw_parts)}) from splitting is unexpected. Expected TEXT, DELIMITER_INFO, TEXT... structure. Does it end with a delimiter?")
@@ -79,11 +75,9 @@ class FileProcessor:
             return None
 
         num_chapters = (len(raw_parts) - 1) // 3
-        if num_chapters == 0 : # This implies len(raw_parts) was 1, which should be caught above.
-                               # Or, if (len(raw_parts)-1) was 0, means len was 1.
-            self.log_callback("No chapters to process based on parsed structure (e.g. file was just a delimiter).") # Should be caught by other checks.
+        if num_chapters == 0 :
+            self.log_callback("No chapters to process based on parsed structure (e.g. file was just a delimiter).")
             return None
-
 
         for i in range(num_chapters):
             text_segment_content = raw_parts[i * 3].strip()
@@ -93,22 +87,27 @@ class FileProcessor:
                 self.log_callback(f"Error: File structure invalid. Empty text segment found before delimiter for chapter {i + 1}.")
                 return None
 
-            chapter_id_for_filename = start_number + current_chapter_id_offset
-            chapter_name_to_use = f"Chapter_{chapter_id_for_filename}"
+            current_filename_id = filename_id_counter # Use current filename_id_counter for this chapter's file
+
+            chapter_name_to_use = ""
 
             if custom_name_from_group is not None and custom_name_from_group.strip():
                 chapter_name_to_use = custom_name_from_group.strip()
+                # default_naming_sequence_counter is NOT incremented
+            else:
+                chapter_name_to_use = f"Chapter_{default_naming_sequence_counter}"
+                default_naming_sequence_counter += 1 # Increment only for default names
 
             processed_chapters.append({
                 "name": chapter_name_to_use,
                 "content": text_segment_content,
-                "id_for_filename": chapter_id_for_filename
+                "id_for_filename": current_filename_id # This is the sequential ID for the filename
             })
-            current_chapter_id_offset += 1
+            filename_id_counter += 1 # Always increment for the next file's ID
 
         if not processed_chapters:
-            self.log_callback("No valid chapters were processed (this might indicate an issue with logic if num_chapters > 0).")
-            return None # Should generally be caught if num_chapters was 0.
+            self.log_callback("No valid chapters were processed.")
+            return None
 
         input_dir = os.path.dirname(input_filepath)
         input_filename_no_ext = os.path.splitext(os.path.basename(input_filepath))[0]
@@ -118,12 +117,13 @@ class FileProcessor:
 
         chapter_file_paths = []
         for chapter_data in processed_chapters:
+            # Use 'id_for_filename' from chapter_data for the actual filename number
             chapter_num_for_filename = chapter_data["id_for_filename"]
 
             sanitized_folder_name = re.sub(r'[<>:"/\|?*]', '_', chapter_data["name"])
             sanitized_folder_name = re.sub(r'^\.+|^\s+|\.+$|\s+$', '', sanitized_folder_name).strip()
-            if not sanitized_folder_name:
-                sanitized_folder_name = f"Chapter_{chapter_num_for_filename}"
+            if not sanitized_folder_name: # Should not happen if default naming is robust
+                sanitized_folder_name = f"Chapter_{chapter_num_for_filename}" # Fallback, but logic aims to prevent empty names
 
             chapter_folder_path = os.path.join(base_output_path, sanitized_folder_name)
             os.makedirs(chapter_folder_path, exist_ok=True)
@@ -138,8 +138,7 @@ class FileProcessor:
                 chapter_file_paths.append(chapter_filepath)
             except Exception as e:
                 self.log_callback(f"Error writing chapter file {chapter_filepath}: {e}")
-                # Consider cleanup here
-                return None # Fail fast if a chapter cannot be written
+                return None
 
         if not chapter_file_paths and num_chapters > 0 :
              self.log_callback("Error: Chapters were processed but no files were written (unexpected).")
