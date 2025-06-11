@@ -7,6 +7,8 @@ class FileProcessor:
         self.log_callback = log_callback
 
     def split_file(self, input_filepath, split_mode, split_value, start_number, chapter_filename_suffix="orig"):
+        # This method is assumed to be correctly updated from the previous step.
+        # For brevity, its code is not repeated here, but it's part of the actual file_processor.py.
         if not os.path.exists(input_filepath):
             self.log_callback(f"Error: Input file not found: {input_filepath}")
             return None
@@ -49,11 +51,8 @@ class FileProcessor:
             return None
 
         processed_chapters = []
-        # Initialize the two counters
-        filename_id_counter = start_number
         default_naming_sequence_counter = start_number
 
-        # --- Structural Validations ---
         if not raw_parts[0].strip() and len(raw_parts) > 1:
             self.log_callback("Error: File structure invalid. Content cannot start with a delimiter.")
             return None
@@ -67,7 +66,7 @@ class FileProcessor:
                 return None
 
         if (len(raw_parts) - 1) % 3 != 0:
-            self.log_callback(f"Error: Invalid file structure. Segment count ({len(raw_parts)}) from splitting is unexpected. Expected TEXT, DELIMITER_INFO, TEXT... structure. Does it end with a delimiter?")
+            self.log_callback(f"Error: Invalid file structure. Segment count ({len(raw_parts)}) from splitting is unexpected.")
             return None
 
         if raw_parts[len(raw_parts) - 1].strip():
@@ -76,7 +75,7 @@ class FileProcessor:
 
         num_chapters = (len(raw_parts) - 1) // 3
         if num_chapters == 0 :
-            self.log_callback("No chapters to process based on parsed structure (e.g. file was just a delimiter).")
+            self.log_callback("No chapters to process based on parsed structure.")
             return None
 
         for i in range(num_chapters):
@@ -87,23 +86,17 @@ class FileProcessor:
                 self.log_callback(f"Error: File structure invalid. Empty text segment found before delimiter for chapter {i + 1}.")
                 return None
 
-            current_filename_id = filename_id_counter # Use current filename_id_counter for this chapter's file
-
-            chapter_name_to_use = ""
-
+            chapter_folder_name_to_use = ""
             if custom_name_from_group is not None and custom_name_from_group.strip():
-                chapter_name_to_use = custom_name_from_group.strip()
-                # default_naming_sequence_counter is NOT incremented
+                chapter_folder_name_to_use = custom_name_from_group.strip()
             else:
-                chapter_name_to_use = f"Chapter_{default_naming_sequence_counter}"
-                default_naming_sequence_counter += 1 # Increment only for default names
+                chapter_folder_name_to_use = f"Chapter_{default_naming_sequence_counter}"
+                default_naming_sequence_counter += 1
 
             processed_chapters.append({
-                "name": chapter_name_to_use,
-                "content": text_segment_content,
-                "id_for_filename": current_filename_id # This is the sequential ID for the filename
+                "folder_name": chapter_folder_name_to_use,
+                "content": text_segment_content
             })
-            filename_id_counter += 1 # Always increment for the next file's ID
 
         if not processed_chapters:
             self.log_callback("No valid chapters were processed.")
@@ -117,18 +110,18 @@ class FileProcessor:
 
         chapter_file_paths = []
         for chapter_data in processed_chapters:
-            # Use 'id_for_filename' from chapter_data for the actual filename number
-            chapter_num_for_filename = chapter_data["id_for_filename"]
-
-            sanitized_folder_name = re.sub(r'[<>:"/\|?*]', '_', chapter_data["name"])
+            raw_folder_name = chapter_data["folder_name"]
+            sanitized_folder_name = re.sub(r'[<>:"/\|?*]', '_', raw_folder_name)
             sanitized_folder_name = re.sub(r'^\.+|^\s+|\.+$|\s+$', '', sanitized_folder_name).strip()
-            if not sanitized_folder_name: # Should not happen if default naming is robust
-                sanitized_folder_name = f"Chapter_{chapter_num_for_filename}" # Fallback, but logic aims to prevent empty names
+
+            if not sanitized_folder_name:
+                 self.log_callback(f"Warning: Sanitized folder name for '{raw_folder_name}' is empty. Using a placeholder 'Sanitized_Empty_Name'.")
+                 sanitized_folder_name = "Sanitized_Empty_Name"
 
             chapter_folder_path = os.path.join(base_output_path, sanitized_folder_name)
             os.makedirs(chapter_folder_path, exist_ok=True)
 
-            chapter_filename = f"{chapter_num_for_filename}_{chapter_filename_suffix}.txt"
+            chapter_filename = f"{sanitized_folder_name}_{chapter_filename_suffix}.txt"
             chapter_filepath = os.path.join(chapter_folder_path, chapter_filename)
 
             try:
@@ -148,12 +141,13 @@ class FileProcessor:
         return chapter_file_paths
 
     def duplicate_and_modify_chapters(self, chapter_paths, text_to_add_after_codeblock, empty_file_suffix_text):
-        # This method remains unchanged.
         if not chapter_paths:
             self.log_callback("No chapter paths provided for duplication.")
             return
 
         modified_count = 0
+        assumed_original_suffix = "_orig" # Assuming files from split_file use "_orig"
+
         for original_chapter_path in chapter_paths:
             if not os.path.exists(original_chapter_path):
                 self.log_callback(f"Warning: Chapter file not found, skipping: {original_chapter_path}")
@@ -161,7 +155,7 @@ class FileProcessor:
 
             chapter_dir = os.path.dirname(original_chapter_path)
             original_filename = os.path.basename(original_chapter_path)
-            original_filename_no_ext = os.path.splitext(original_filename)[0] 
+            original_filename_no_ext = os.path.splitext(original_filename)[0] # e.g., "MyChapter_orig" or "Chapter_1_orig"
 
             try:
                 with open(original_chapter_path, 'r', encoding='utf-8') as f:
@@ -170,6 +164,8 @@ class FileProcessor:
                 self.log_callback(f"Error reading chapter file {original_chapter_path} for duplication: {e}")
                 continue
 
+            # 1. Create wrapped duplicate: "STEM_orig_wrapped.txt"
+            #    original_filename_no_ext already includes "_orig" if it was there.
             wrapped_content = f"""```
 {original_content}
 ```
@@ -184,15 +180,17 @@ class FileProcessor:
                 self.log_callback(f"Error creating wrapped duplicate {duplicate_filepath}: {e}")
                 continue
             
-            match = re.match(r"(\d+)", original_filename_no_ext)
-            if match:
-                base_chapter_num_str = match.group(1)
-                empty_filename_base = f"{base_chapter_num_str}"
+            # 2. Create empty file: "STEM_{empty_file_suffix_text}.txt"
+            #    Need to get STEM from "STEM_orig"
+            base_stem_for_empty_file = original_filename_no_ext
+            if original_filename_no_ext.endswith(assumed_original_suffix):
+                base_stem_for_empty_file = original_filename_no_ext[:-len(assumed_original_suffix)]
             else:
-                self.log_callback(f"Warning: Could not parse base chapter number from '{original_filename_no_ext}'. Using it as base for empty file name.")
-                empty_filename_base = original_filename_no_ext
-            
-            empty_filename = f"{empty_filename_base}_{empty_file_suffix_text}.txt"
+                # This case occurs if the input file to this function didn't follow the "STEM_orig.txt" convention.
+                # Log a warning, but proceed using the full original_filename_no_ext as the stem.
+                self.log_callback(f"Warning: Original filename '{original_filename_no_ext}' does not end with assumed suffix '{assumed_original_suffix}'. Using full name as base for empty file.")
+
+            empty_filename = f"{base_stem_for_empty_file}_{empty_file_suffix_text}.txt"
             empty_filepath = os.path.join(chapter_dir, empty_filename)
             try:
                 with open(empty_filepath, 'w', encoding='utf-8') as ef:
