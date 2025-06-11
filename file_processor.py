@@ -21,96 +21,108 @@ class FileProcessor:
             self.log_callback(f"Error reading input file: {e}")
             return None
 
-        raw_parts = []
+        if not content.strip(): # Handles completely empty or whitespace-only file
+            self.log_callback("Input file is empty or contains only whitespace. No chapters to split.")
+            return None
+
+        base_delimiter_pattern_for_regex = ""
         if split_mode == "string":
             if not split_value:
-                self.log_callback("Error: Split string cannot be empty.")
+                self.log_callback("Error: Split string cannot be empty for 'string' mode.")
                 return None
-            # Escape split_value for regex, then use capturing group
-            raw_parts = re.split(f'({re.escape(split_value)})', content)
+            base_delimiter_pattern_for_regex = re.escape(split_value)
         elif split_mode == "regex":
             if not split_value:
-                self.log_callback("Error: Split regex cannot be empty.")
+                self.log_callback("Error: Split regex cannot be empty for 'regex' mode.")
                 return None
-            try:
-                # Use capturing group for regex mode
-                raw_parts = re.split(f'({split_value})', content)
-            except re.error as e:
-                self.log_callback(f"Error in regex pattern: {e}")
-                return None
+            base_delimiter_pattern_for_regex = split_value # User provides valid regex
         else:
             self.log_callback("Error: Invalid split mode.")
             return None
 
+        delimiter_capturing_regex = f"({base_delimiter_pattern_for_regex}(?:\s*\(([^)]*)\))?)"
+
+        try:
+            raw_parts = re.split(delimiter_capturing_regex, content)
+        except re.error as e:
+            self.log_callback(f"Error in splitting regex pattern: {e}")
+            return None
+
         processed_chapters = []
-        current_chapter_id_counter = 0 # Tracks the number of chapters identified
+        current_chapter_id_offset = 0
 
-        # Handle content before the first delimiter (raw_parts[0])
-        if raw_parts and raw_parts[0].strip():
-            first_part_content = raw_parts[0].strip()
-            chapter_id = start_number + current_chapter_id_counter
+        if not raw_parts[0].strip() and len(raw_parts) > 1:
+            self.log_callback("Error: File structure invalid. Content cannot start with a delimiter.")
+            return None
+
+        if len(raw_parts) == 1:
+            # This means no delimiter was found. If content was just "text", it's an error
+            # because the structure TEXT DELIM ... FINAL_DELIM is expected.
+            # If raw_parts[0] is non-empty, it means it's "text" without any delimiter.
+            if raw_parts[0].strip():
+                self.log_callback("Error: File structure invalid. No delimiters found, or file does not end with a delimiter as required.")
+                return None
+            else:
+                # If raw_parts[0] is empty/whitespace and len is 1, it means the original content was empty/whitespace.
+                # This should have been caught by the `if not content.strip():` check at the beginning.
+                # This path should ideally not be reached if the initial check is effective.
+                self.log_callback("Input file is effectively empty after attempting to split. No chapters.")
+                return None
+
+
+        if (len(raw_parts) - 1) % 3 != 0:
+            self.log_callback(f"Error: Invalid file structure. Segment count ({len(raw_parts)}) from splitting is unexpected. Expected TEXT, DELIMITER_INFO, TEXT... structure. Does it end with a delimiter?")
+            return None
+
+        if raw_parts[len(raw_parts) - 1].strip():
+            self.log_callback("Error: File structure invalid. There is text content after the final delimiter.")
+            return None
+
+        num_chapters = (len(raw_parts) - 1) // 3
+        if num_chapters == 0 : # This implies len(raw_parts) was 1, which should be caught above.
+                               # Or, if (len(raw_parts)-1) was 0, means len was 1.
+            self.log_callback("No chapters to process based on parsed structure (e.g. file was just a delimiter).") # Should be caught by other checks.
+            return None
+
+
+        for i in range(num_chapters):
+            text_segment_content = raw_parts[i * 3].strip()
+            custom_name_from_group = raw_parts[i * 3 + 2]
+
+            if not text_segment_content:
+                self.log_callback(f"Error: File structure invalid. Empty text segment found before delimiter for chapter {i + 1}.")
+                return None
+
+            chapter_id_for_filename = start_number + current_chapter_id_offset
+            chapter_name_to_use = f"Chapter_{chapter_id_for_filename}"
+
+            if custom_name_from_group is not None and custom_name_from_group.strip():
+                chapter_name_to_use = custom_name_from_group.strip()
+
             processed_chapters.append({
-                "name": f"Chapter_{chapter_id}",
-                "content": first_part_content,
-                "id_for_filename": chapter_id
+                "name": chapter_name_to_use,
+                "content": text_segment_content,
+                "id_for_filename": chapter_id_for_filename
             })
-            current_chapter_id_counter += 1
-
-        # Process parts starting from the first delimiter
-        # Loop takes delimiter at raw_parts[i] and content_after at raw_parts[i+1]
-        for i in range(1, len(raw_parts), 2):
-            # raw_parts[i] is the delimiter. We are interested in raw_parts[i+1].
-            if (i + 1) < len(raw_parts):
-                text_after_delimiter = raw_parts[i+1]
-
-                # Regex to find custom name: e.g., "(My Chapter) actual content"
-                # Changed ([^)]+) to ([^)]*) to allow empty names like ()
-                custom_name_match = re.match(r'^\s*\(([^)]*)\)\s*', text_after_delimiter)
-
-                chapter_id = start_number + current_chapter_id_counter
-                chapter_name_to_use = f"Chapter_{chapter_id}" # Default name
-                actual_chapter_content = text_after_delimiter # Default content
-
-                if custom_name_match:
-                    # Always update content to be what's after the matched parentheses pattern
-                    actual_chapter_content = text_after_delimiter[custom_name_match.end():]
-                    custom_name = custom_name_match.group(1).strip()
-                    if custom_name: # Use custom name if it's not empty
-                        chapter_name_to_use = custom_name
-                    # Else, chapter_name_to_use remains the default (e.g., "Chapter_X")
-
-                actual_chapter_content = actual_chapter_content.strip()
-
-                # Add chapter only if there's actual content OR if a non-empty custom name was specified
-                # This prevents creating "Chapter_X" for empty sections after a delimiter,
-                # but ensures custom-named chapters are created even if their content is empty.
-                if actual_chapter_content or (custom_name_match and custom_name_match.group(1).strip()):
-                    processed_chapters.append({
-                        "name": chapter_name_to_use,
-                        "content": actual_chapter_content,
-                        "id_for_filename": chapter_id
-                    })
-                    current_chapter_id_counter += 1 # Increment for each chapter added
+            current_chapter_id_offset += 1
 
         if not processed_chapters:
-            self.log_callback("No chapters found after splitting. Check your split string/regex and content structure.")
-            return None
+            self.log_callback("No valid chapters were processed (this might indicate an issue with logic if num_chapters > 0).")
+            return None # Should generally be caught if num_chapters was 0.
 
         input_dir = os.path.dirname(input_filepath)
         input_filename_no_ext = os.path.splitext(os.path.basename(input_filepath))[0]
         base_output_folder_name = f"{input_filename_no_ext}_chapters"
         base_output_path = os.path.join(input_dir, base_output_folder_name)
-        
         os.makedirs(base_output_path, exist_ok=True)
 
         chapter_file_paths = []
         for chapter_data in processed_chapters:
             chapter_num_for_filename = chapter_data["id_for_filename"]
 
-            # Sanitize folder name
             sanitized_folder_name = re.sub(r'[<>:"/\|?*]', '_', chapter_data["name"])
-            sanitized_folder_name = re.sub(r'^\.+|^\s+|\.+$|\s+$', '', sanitized_folder_name).strip() # leading/trailing dots/spaces
-            if not sanitized_folder_name: # Fallback if name becomes empty after sanitization
+            sanitized_folder_name = re.sub(r'^\.+|^\s+|\.+$|\s+$', '', sanitized_folder_name).strip()
+            if not sanitized_folder_name:
                 sanitized_folder_name = f"Chapter_{chapter_num_for_filename}"
 
             chapter_folder_path = os.path.join(base_output_path, sanitized_folder_name)
@@ -126,13 +138,14 @@ class FileProcessor:
                 chapter_file_paths.append(chapter_filepath)
             except Exception as e:
                 self.log_callback(f"Error writing chapter file {chapter_filepath}: {e}")
-        
-        if chapter_file_paths:
-            self.log_callback(f"Successfully split into {len(chapter_file_paths)} chapters.")
-        else:
-            # This may occur if input is empty or only delimiters with no content.
-            self.log_callback("Processing complete, but no chapter files were created.")
+                # Consider cleanup here
+                return None # Fail fast if a chapter cannot be written
 
+        if not chapter_file_paths and num_chapters > 0 :
+             self.log_callback("Error: Chapters were processed but no files were written (unexpected).")
+             return None
+
+        self.log_callback(f"Successfully split into {len(chapter_file_paths)} chapters.")
         return chapter_file_paths
 
     def duplicate_and_modify_chapters(self, chapter_paths, text_to_add_after_codeblock, empty_file_suffix_text):
@@ -172,19 +185,19 @@ class FileProcessor:
                 self.log_callback(f"Error creating wrapped duplicate {duplicate_filepath}: {e}")
                 continue
             
-            match = re.match(r"(\d+)", original_filename_no_ext) # Extracts number from "1_orig"
+            match = re.match(r"(\d+)", original_filename_no_ext)
             if match:
                 base_chapter_num_str = match.group(1)
                 empty_filename_base = f"{base_chapter_num_str}"
             else:
                 self.log_callback(f"Warning: Could not parse base chapter number from '{original_filename_no_ext}'. Using it as base for empty file name.")
-                empty_filename_base = original_filename_no_ext # Fallback
+                empty_filename_base = original_filename_no_ext
             
             empty_filename = f"{empty_filename_base}_{empty_file_suffix_text}.txt"
             empty_filepath = os.path.join(chapter_dir, empty_filename)
             try:
                 with open(empty_filepath, 'w', encoding='utf-8') as ef:
-                    pass # Create an empty file
+                    pass
                 self.log_callback(f"Created empty file: {empty_filepath}")
                 modified_count += 1
             except Exception as e:
@@ -193,4 +206,4 @@ class FileProcessor:
         if modified_count > 0:
             self.log_callback(f"Successfully duplicated and modified {modified_count} chapters.")
         else:
-            self.log_callback("No chapters were duplicated or modified (This might be expected if input was empty or no paths provided).")
+            self.log_callback("No chapters were duplicated or modified.")
